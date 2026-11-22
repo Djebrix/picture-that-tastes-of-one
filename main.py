@@ -1,26 +1,27 @@
-"""A single ripe strawberry, extreme macro close-up.
+#!/usr/bin/env python3
+"""One Perfect Apple — a single glossy red apple, drawn pixel by pixel.
 
-Procedural render, Python 3.13 standard library only. Deterministic:
-one fixed seed drives every random choice, no time or OS randomness.
-Writes one 1024x1024 PNG to $ENTRY_OUTPUT_DIR/entry.png
-(default /output/entry.png).
+Pure Python 3.13 standard library: no randomness, no time, no network.
+Writes /output/entry.png (1024x1024 PNG, deterministic: two runs are
+byte-identical). One ingredient, one picture, judged on how delicious it
+looks.
 """
 
 import math
 import os
-import random
 import struct
 import zlib
 
-W = H = 1024
-SEED = 20261122
+W = 1024
+H = 1024
+OUT = "/output/entry.png"
 
 
-def clamp255(v):
-    if v < 0:
-        return 0
-    if v > 255:
-        return 255
+def clamp(v, lo=0.0, hi=1.0):
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
     return v
 
 
@@ -28,310 +29,222 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
-def body_half_width(y):
-    """Half width of the strawberry body at row y (0 outside the body)."""
-    if y < 285 or y > 935:
-        return 0.0
-    t = (y - 285) / 650.0
-    return 312.0 * (1.0 - t ** 2.3) ** 0.55
+def smoothstep(a, b, x):
+    t = clamp((x - a) / (b - a))
+    return t * t * (3.0 - 2.0 * t)
 
 
-def render():
-    rng = random.Random(SEED)
-
-    # Small tiled grain, values in [-2, 2], reused across the frame.
-    noise = [[rng.randint(-2, 2) for _ in range(128)] for _ in range(128)]
-
-    # Warm out-of-focus background circles: (cx, cy, r, rgb, strength).
-    bokeh = []
-    for _ in range(18):
-        bokeh.append((
-            rng.uniform(-40, 1064),
-            rng.uniform(-40, 1064),
-            rng.uniform(34, 120),
-            (rng.randint(238, 255), rng.randint(186, 218),
-             rng.randint(118, 168)),
-            rng.uniform(0.10, 0.26),
-        ))
-
-    # ---- background: warm creamy vertical gradient -------------------
-    top = (250, 226, 190)
-    bottom = (219, 174, 134)
-    rows = []
-    for y in range(H):
-        t = y / (H - 1)
-        r = int(lerp(top[0], bottom[0], t))
-        g = int(lerp(top[1], bottom[1], t))
-        b = int(lerp(top[2], bottom[2], t))
-        rows.append(bytearray(bytes((r, g, b)) * W))
-
-    # ---- bokeh circles, soft radial falloff --------------------------
-    for (cx, cy, rad, col, strength) in bokeh:
-        y0 = max(0, int(cy - rad))
-        y1 = min(H - 1, int(cy + rad) + 1)
-        for y in range(y0, y1):
-            dy = (y - cy) / rad
-            chord = math.sqrt(max(0.0, 1.0 - dy * dy)) * rad
-            x0 = max(0, int(cx - chord))
-            x1 = min(W - 1, int(cx + chord) + 1)
-            row = rows[y]
-            for x in range(x0, x1):
-                d = math.hypot((x - cx) / rad, dy)
-                if d >= 1.0:
-                    continue
-                a = strength * (1.0 - d * d)
-                i = x * 3
-                row[i] = clamp255(int(row[i] + (col[0] - row[i]) * a))
-                row[i + 1] = clamp255(int(row[i + 1] + (col[1] - row[i + 1]) * a))
-                row[i + 2] = clamp255(int(row[i + 2] + (col[2] - row[i + 2]) * a))
-
-    # ---- calyx leaves (drawn first; the berry body covers their base)
-    leaf_base_x, leaf_base_y = 512, 312
-    leaf_angles = (-168, -138, -108, -90, -72, -42, -12)
-    for k, ang_deg in enumerate(leaf_angles):
-        ang = math.radians(ang_deg)
-        dx = math.cos(ang)
-        dy = math.sin(ang)
-        # Perpendicular direction.
-        px, py = -dy, dx
-        length = 150.0 + 26.0 * math.sin(k * 2.3 + 1.0) + (18.0 if k in (2, 4) else 0.0)
-        max_w = 15.0 + 4.0 * math.sin(k * 1.7)
-        steps = int(length)
-        for s in range(steps):
-            f = s / steps
-            # Slight outward curve as the leaf grows.
-            bend = 14.0 * f * f * (1 if k % 2 == 0 else -1)
-            cx = leaf_base_x + dx * s + px * bend
-            cy = leaf_base_y + dy * s + py * bend
-            half = max_w * math.sin(math.pi * (f ** 0.75)) * (1.0 - 0.25 * f)
-            if half < 0.6:
-                continue
-            # Leaf colour: deep green at the base, brighter toward the tip.
-            gr = int(lerp(34, 74, f))
-            gg = int(lerp(96, 152, f))
-            gb = int(lerp(38, 62, f))
-            iy = int(round(cy))
-            if iy < 0 or iy >= H:
-                continue
-            row = rows[iy]
-            x0 = max(0, int(cx - half))
-            x1 = min(W - 1, int(cx + half) + 1)
-            for x in range(x0, x1):
-                # Vein: a lighter stripe down the middle of the leaf.
-                vein = 1.0 if abs(x - cx) < 1.6 else 0.0
-                i = x * 3
-                row[i] = clamp255(gr + (52 if vein else 0))
-                row[i + 1] = clamp255(gg + (58 if vein else 0))
-                row[i + 2] = clamp255(gb + (30 if vein else 0))
-
-    # Short stem rising from the calyx.
-    for s in range(64):
-        cx = 512 + int(10.0 * math.sin(s / 22.0))
-        cy = 312 - s
-        if cy < 0:
-            break
-        row = rows[cy]
-        for x in range(cx - 7, cx + 8):
-            if 0 <= x < W:
-                i = x * 3
-                row[i] = 74
-                row[i + 1] = 122
-                row[i + 2] = 58
-
-    # ---- strawberry body ---------------------------------------------
-    # Vertical colour stops: bright sunlit red at the shoulder, deep
-    # ruby in the middle, dark wine red toward the tip.
-    stops = (
-        (0.00, (242, 52, 44)),
-        (0.35, (220, 26, 34)),
-        (0.70, (194, 16, 30)),
-        (1.00, (138, 10, 24)),
+def mix3(c1, c2, t):
+    return (
+        int(lerp(c1[0], c2[0], t)),
+        int(lerp(c1[1], c2[1], t)),
+        int(lerp(c1[2], c2[2], t)),
     )
 
-    def body_colour(t):
-        for j in range(len(stops) - 1):
-            t0, c0 = stops[j]
-            t1, c1 = stops[j + 1]
-            if t0 <= t <= t1:
-                f = (t - t0) / (t1 - t0)
-                return (lerp(c0[0], c1[0], f),
-                        lerp(c0[1], c1[1], f),
-                        lerp(c0[2], c1[2], f))
-        return stops[-1][1]
 
-    for y in range(285, 936):
-        hw = body_half_width(y)
-        if hw <= 0.0:
-            continue
-        t = (y - 285) / 650.0
-        base_r, base_g, base_b = body_colour(t)
-        row = rows[y]
-        x0 = max(0, int(512 - hw))
-        x1 = min(W - 1, int(512 + hw) + 1)
-        vv = (y - 560) / 360.0
-        for x in range(x0, x1):
-            dx = (x - 512) / hw
-            ax = abs(dx)
-            if ax >= 1.0:
-                continue
-            # Soft edge anti-aliasing over the last few pixels.
-            edge = 1.0
-            if ax > 0.965:
-                edge = (1.0 - ax) / 0.035
-                edge = edge * edge * (3.0 - 2.0 * edge)
-            # Light from the upper left: shade across the curved body.
-            shade = 0.70 + 0.38 * (-dx * 0.72 - vv * 0.55)
-            if shade < 0.36:
-                shade = 0.36
-            elif shade > 1.16:
-                shade = 1.16
-            # Soft shadow tucked under the calyx at the top of the body.
-            shade *= 1.0 - 0.34 * math.exp(-(((y - 318) / 46.0) ** 2))
-            # Broad glossy sheen slightly left of centre.
-            sheen = 0.14 * math.exp(-((dx + 0.28) ** 2) / 0.055)
-            # Two soft specular highlights, plus one tight hot spot.
-            h1 = 132.0 * math.exp(-(((x - 408) / 150.0) ** 2
-                                    + ((y - 428) / 150.0) ** 2) * 2.1)
-            h2 = 64.0 * math.exp(-(((x - 622) / 105.0) ** 2
-                                   + ((y - 648) / 105.0) ** 2) * 2.0)
-            h3 = 95.0 * math.exp(-(((x - 452) / 46.0) ** 2
-                                   + ((y - 392) / 46.0) ** 2) * 2.4)
-            r = base_r * (shade + sheen) + h1 + h2 + h3
-            g = base_g * (shade + sheen) + h1 * 0.92 + h2 * 0.9 + h3 * 0.9
-            b = base_b * (shade + sheen) + h1 * 0.85 + h2 * 0.85 + h3 * 0.82
-            i = x * 3
-            if edge >= 1.0:
-                row[i] = clamp255(int(r))
-                row[i + 1] = clamp255(int(g))
-                row[i + 2] = clamp255(int(b))
-            else:
-                row[i] = clamp255(int(row[i] + (r - row[i]) * edge))
-                row[i + 1] = clamp255(int(row[i + 1] + (g - row[i + 1]) * edge))
-                row[i + 2] = clamp255(int(row[i + 2] + (b - row[i + 2]) * edge))
-
-    # ---- achenes (pale seeds) set in shallow dimples -----------------
-    seed_rng = random.Random(SEED + 7)
-    seeds = []
-    y = 350
-    band = 0
-    while y < 890:
-        hw = body_half_width(y)
-        if hw > 40:
-            n = max(3, int(hw / 62))
-            for j in range(n):
-                frac = (j + 0.5) / n
-                jitter = seed_rng.uniform(-0.16, 0.16)
-                sx = 512 + (frac * 2.0 - 1.0 + jitter) * hw * 0.86
-                sy = y + seed_rng.uniform(-14, 14)
-                seeds.append((sx, sy, seed_rng.uniform(8.0, 11.0),
-                              seed_rng.uniform(13.0, 17.0)))
-        y += 46 + (band % 2) * 22
-        band += 1
-    for (sx, sy, rx, ry) in seeds:
-        # Dimple: a darker halo slightly larger than the seed.
-        for (rrx, rry, mul) in ((rx + 5.0, ry + 6.0, 0.58), (rx, ry, None)):
-            iy0 = max(0, int(sy - rry))
-            iy1 = min(H - 1, int(sy + rry) + 1)
-            for iy in range(iy0, iy1):
-                ddy = (iy - sy) / rry
-                chord = math.sqrt(max(0.0, 1.0 - ddy * ddy)) * rrx
-                ix0 = max(0, int(sx - chord))
-                ix1 = min(W - 1, int(sx + chord) + 1)
-                row = rows[iy]
-                for ix in range(ix0, ix1):
-                    i = ix * 3
-                    if mul is None:
-                        # Pale cream seed, lit from the upper left.
-                        lit = 1.0 + 0.10 * (1.0 - (iy - sy) / max(ry, 1.0))
-                        row[i] = clamp255(int(246 * lit))
-                        row[i + 1] = clamp255(int(231 * lit))
-                        row[i + 2] = clamp255(int(176 * lit))
-                    else:
-                        row[i] = int(row[i] * mul)
-                        row[i + 1] = int(row[i + 1] * mul)
-                        row[i + 2] = int(row[i + 2] * mul)
-
-    # ---- water droplets catching the light ---------------------------
-    drop_rng = random.Random(SEED + 21)
-    for _ in range(30):
-        dy_ = drop_rng.uniform(330, 880)
-        hw = body_half_width(int(dy_))
-        if hw < 60:
-            continue
-        dx_ = drop_rng.uniform(-0.8, 0.8) * hw
-        cx = 512 + dx_
-        cy = dy_
-        rad = drop_rng.uniform(4.0, 12.0)
-        iy0 = max(0, int(cy - rad))
-        iy1 = min(H - 1, int(cy + rad) + 1)
-        for iy in range(iy0, iy1):
-            ddy = (iy - cy) / rad
-            chord = math.sqrt(max(0.0, 1.0 - ddy * ddy)) * rad
-            ix0 = max(0, int(cx - chord))
-            ix1 = min(W - 1, int(cx + chord) + 1)
-            row = rows[iy]
-            for ix in range(ix0, ix1):
-                d = math.hypot((ix - cx) / rad, ddy)
-                if d >= 1.0:
-                    continue
-                # Lift toward white in the middle, bright sparkle top-left.
-                lift = 0.38 * (1.0 - d * d)
-                spark = 0.85 * math.exp(-(((ix - (cx - rad * 0.35)) / 2.2) ** 2
-                                         + ((iy - (cy - rad * 0.35)) / 2.2) ** 2))
-                i = ix * 3
-                row[i] = clamp255(int(row[i] + (255 - row[i]) * lift + 255 * spark))
-                row[i + 1] = clamp255(int(row[i + 1] + (255 - row[i + 1]) * lift + 255 * spark))
-                row[i + 2] = clamp255(int(row[i + 2] + (255 - row[i + 2]) * lift + 255 * spark))
-
-    # ---- vignette + grain, one final pass ----------------------------
-    fx = [1.0 - 0.16 * ((x - 512) / 512.0) ** 2 for x in range(W)]
-    fy = [1.0 - 0.16 * ((y - 512) / 512.0) ** 2 for y in range(H)]
-    for y in range(H):
-        row = rows[y]
-        fyy = fy[y]
-        nrow = noise[y & 127]
-        for x in range(W):
-            f = fx[x] * fyy
-            n = nrow[x & 127]
-            i = x * 3
-            row[i] = clamp255(int(row[i] * f) + n)
-            row[i + 1] = clamp255(int(row[i + 1] * f) + n)
-            row[i + 2] = clamp255(int(row[i + 2] * f) + n)
-
-    return rows
-
-
-def png_bytes(rows):
-    # Filter 2 (Up): each byte stored as the difference from the byte
-    # directly above it. The image is mostly smooth vertical gradients,
-    # so Up residuals are small and compress far better than raw rows.
+def write_png(path, w, h, buf):
     raw = bytearray()
-    prev = bytes(W * 3)
-    for row in rows:
-        raw.append(2)
-        cur = bytes(row)
-        raw.extend((c - p) & 0xFF for c, p in zip(cur, prev))
-        prev = cur
-    compressed = zlib.compress(bytes(raw), 9)
+    stride = w * 3
+    for y in range(h):
+        raw.append(0)
+        raw += buf[y * stride:(y + 1) * stride]
+    comp = zlib.compress(bytes(raw), 9)
 
     def chunk(tag, data):
         out = struct.pack(">I", len(data)) + tag + data
         out += struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
         return out
 
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", compressed) + chunk(b"IEND", b""))
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", ihdr)
+    png += chunk(b"IDAT", comp)
+    png += chunk(b"IEND", b"")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(png)
+
+
+def draw():
+    buf = bytearray(W * H * 3)
+
+    top = (253, 240, 213)      # warm cream
+    mid = (243, 217, 164)      # honey at the horizon
+    bottom = (224, 180, 118)   # wooden table
+    horizon = 0.68
+
+    # --- background: vertical gradient + soft vignette + warm glow ---
+    for y in range(H):
+        t = y / H
+        if t < horizon:
+            base = mix3(top, mid, t / horizon)
+        else:
+            base = mix3(mid, bottom, (t - horizon) / (1.0 - horizon))
+        dy = (y - 512.0) / 512.0
+        row = y * W * 3
+        for x in range(W):
+            dx = (x - 512.0) / 512.0
+            d2 = dx * dx + dy * dy
+            vig = 1.0 - 0.10 * d2
+            # warm glow behind the apple
+            gd = math.sqrt((x - 512.0) ** 2 + (y - 560.0) ** 2)
+            glow = 0.16 * (1.0 - smoothstep(180.0, 430.0, gd))
+            r = int(base[0] * vig + (255 - base[0] * vig) * glow * 0.4)
+            g = int(base[1] * vig + (228 - base[1] * vig) * glow * 0.4)
+            b = int(base[2] * vig + (170 - base[2] * vig) * glow * 0.4)
+            i = row + x * 3
+            buf[i] = r if r < 255 else 255
+            buf[i + 1] = g if g < 255 else 255
+            buf[i + 2] = b if b < 255 else 255
+
+    def blend(x, y, r, g, b, a):
+        if a <= 0.0 or x < 0 or x >= W or y < 0 or y >= H:
+            return
+        i = (y * W + x) * 3
+        ia = 1.0 - a
+        buf[i] = int(buf[i] * ia + r * a)
+        buf[i + 1] = int(buf[i + 1] * ia + g * a)
+        buf[i + 2] = int(buf[i + 2] * ia + b * a)
+
+    def disc(cx, cy, rad, r, g, b, a):
+        x0 = max(0, int(cx - rad) - 1)
+        x1 = min(W - 1, int(cx + rad) + 1)
+        y0 = max(0, int(cy - rad) - 1)
+        y1 = min(H - 1, int(cy + rad) + 1)
+        for yy in range(y0, y1 + 1):
+            for xx in range(x0, x1 + 1):
+                d = math.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / rad
+                if d < 1.0:
+                    blend(xx, yy, r, g, b, a * (1.0 - smoothstep(0.75, 1.0, d)))
+
+    # --- soft shadow on the table ---
+    for yy in range(830, 960):
+        for xx in range(150, 875):
+            ex = (xx - 512.0) / 335.0
+            ey = (yy - 895.0) / 58.0
+            d = ex * ex + ey * ey
+            if d < 1.0:
+                blend(xx, yy, 90, 55, 25, 0.34 * (1.0 - smoothstep(0.4, 1.0, d)))
+
+    # warm bounce light on the table beneath the apple
+    disc(512, 912, 170, 214, 110, 58, 0.12)
+    disc(512, 905, 110, 226, 128, 66, 0.10)
+
+    # --- apple body ---
+    acx, acy, arx, ary = 512.0, 580.0, 322.0, 302.0
+    bright = (232, 62, 52)
+    deep = (138, 18, 18)
+    light = (255, 122, 108)
+    for yy in range(268, 892):
+        ny = (yy - acy) / ary
+        row = yy * W * 3
+        for xx in range(180, 845):
+            nx = (xx - acx) / arx
+            d = math.sqrt(nx * nx + ny * ny)
+            if d >= 1.0:
+                continue
+            alpha = clamp((1.0 - d) * 160.0)
+            # light comes from the upper left
+            lt = clamp(0.5 - 0.5 * (nx * 0.62 + ny * 0.78))
+            col = mix3(deep, bright, lt)
+            col = mix3(col, light, smoothstep(0.62, 1.0, lt) * 0.55)
+            # organic blush variation
+            v = 0.5 + 0.5 * math.sin(xx * 0.021 + 1.7) * math.sin(yy * 0.016 + 0.4)
+            col = mix3(col, deep, v * 0.22 * smoothstep(0.2, 0.9, 1.0 - lt))
+            # rich crimson on the shadow side
+            col = mix3(col, (104, 8, 12), smoothstep(0.55, 1.0, 1.0 - lt) * 0.35)
+            # darken toward the bottom
+            col = mix3(col, deep, smoothstep(0.35, 1.0, ny) * 0.30)
+            i = row + xx * 3
+            buf[i] = int(buf[i] * (1.0 - alpha) + col[0] * alpha)
+            buf[i + 1] = int(buf[i + 1] * (1.0 - alpha) + col[1] * alpha)
+            buf[i + 2] = int(buf[i + 2] * (1.0 - alpha) + col[2] * alpha)
+
+    # --- top dimple ---
+    disc(512, 292, 46, 120, 20, 16, 0.45)
+    disc(512, 296, 26, 96, 16, 14, 0.5)
+
+    # --- leaf (drawn before the stem so the stem overlaps it) ---
+    lcx, lcy = 632.0, 238.0
+    ang = math.radians(-28.0)
+    ca, sa = math.cos(ang), math.sin(ang)
+    for yy in range(180, 300):
+        for xx in range(520, 745):
+            dx, dy = xx - lcx, yy - lcy
+            rx = dx * ca + dy * sa
+            ry = -dx * sa + dy * ca
+            d = math.sqrt((rx / 102.0) ** 2 + (ry / 40.0) ** 2)
+            if d >= 1.0:
+                continue
+            alpha = clamp((1.0 - d) * 60.0)
+            lt = clamp(0.5 - 0.5 * (rx / 102.0 * 0.6 + ry / 40.0 * 0.8))
+            col = mix3((24, 88, 30), (104, 188, 106), lt)
+            i = (yy * W + xx) * 3
+            buf[i] = int(buf[i] * (1.0 - alpha) + col[0] * alpha)
+            buf[i + 1] = int(buf[i + 1] * (1.0 - alpha) + col[1] * alpha)
+            buf[i + 2] = int(buf[i + 2] * (1.0 - alpha) + col[2] * alpha)
+    # leaf vein: thin bright central vein with short side veins
+    for s in range(-88, 89):
+        vx = int(lcx + s * ca)
+        vy = int(lcy - s * sa)
+        disc(vx, vy, 2, 192, 236, 192, 0.9)
+    for s in range(-72, 73, 12):
+        bx = int(lcx + s * ca)
+        by = int(lcy - s * sa)
+        for q in range(1, 10):
+            disc(int(bx + q * 1.6 * sa), int(by + q * 1.6 * ca), 1, 178, 224, 178, 0.7)
+            disc(int(bx - q * 1.6 * sa), int(by - q * 1.6 * ca), 1, 178, 224, 178, 0.7)
+
+    # --- stem: tapered quadratic curve ---
+    p0 = (512.0, 302.0)
+    p1 = (498.0, 246.0)
+    p2 = (532.0, 196.0)
+    for k in range(41):
+        t = k / 40.0
+        x = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * p1[0] + t * t * p2[0]
+        y = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * p1[1] + t * t * p2[1]
+        rad = lerp(15.0, 6.5, t)
+        col = mix3((110, 76, 64), (74, 50, 44), t)
+        disc(x, y, rad, col[0], col[1], col[2], 0.96)
+
+    # --- glossy highlights ---
+    def gloss(cx, cy, rx, ry, angle_deg, peak):
+        ang = math.radians(angle_deg)
+        ca, sa = math.cos(ang), math.sin(ang)
+        x0 = max(0, int(cx - rx) - 2)
+        x1 = min(W - 1, int(cx + rx) + 2)
+        y0 = max(0, int(cy - ry) - 2)
+        y1 = min(H - 1, int(cy + ry) + 2)
+        for yy in range(y0, y1 + 1):
+            for xx in range(x0, x1 + 1):
+                dx, dy = xx - cx, yy - cy
+                qx = dx * ca + dy * sa
+                qy = -dx * sa + dy * ca
+                d = math.sqrt((qx / rx) ** 2 + (qy / ry) ** 2)
+                if d < 1.0:
+                    blend(xx, yy, 255, 255, 255,
+                          peak * (1.0 - smoothstep(0.45, 1.0, d)))
+
+    gloss(408, 432, 122, 74, -25, 0.68)
+    gloss(362, 522, 56, 36, -20, 0.34)
+    # small intense specular dot inside the main gloss
+    gloss(378, 402, 34, 20, -25, 0.78)
+
+    # warm rim light along the lower-right edge of the apple
+    for k in range(31):
+        ang = math.radians(8.0 + k * 2.2)
+        ex = acx + math.cos(ang) * (arx - 7.0)
+        ey = acy + math.sin(ang) * (ary - 7.0)
+        disc(ex, ey, 7, 255, 178, 118, 0.30)
+
+    return buf
 
 
 def main():
-    rows = render()
-    data = png_bytes(rows)
-    out_dir = os.environ.get("ENTRY_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "entry.png")
-    with open(path, "wb") as f:
-        f.write(data)
+    buf = draw()
+    write_png(OUT, W, H, buf)
+    size = os.path.getsize(OUT)
+    print(f"wrote {OUT}: {W}x{H}, {size} bytes")
 
 
 if __name__ == "__main__":
